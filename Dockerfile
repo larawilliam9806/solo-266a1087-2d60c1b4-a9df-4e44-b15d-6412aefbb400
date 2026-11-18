@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY webapp/ ./webapp/
-COPY demo/make_demo_db.py demo/find_duplicates.sql ./demo/
+COPY demo/make_demo_db.py demo/find_duplicates.sql demo/find_raw_packets.sql ./demo/
 
 # 构建期生成传感器演示库，并准备上传目录（非 root 运行）
 RUN python demo/make_demo_db.py /app/demo/demo_sensors.db \

@@ -35,7 +35,7 @@ gunicorn --pythonpath webapp --bind 0.0.0.0:8000 --workers 1 --threads 16 app:ap
 | --- | --- |
 | 上传 SQLite 副本 | `POST /upload`，校验 SQLite 文件头，按会话隔离存储，可随时清除 |
 | 查看表结构 | `GET /schema`：表/视图/索引、列定义、行数 |
-| 仅 SELECT / WITH | 文本预检（跳过注释取首关键字）+ SQLite authorizer 双层约束 |
+| 仅 SELECT / WITH | 文本预检（跳过注释取首关键字）+ SQLite authorizer 双层约束；`LIKE` 作为只读表达式随 SELECT/WITH 正常放行 |
 | 不得修改原库 | 连接以 `file:...?mode=ro` 只读打开；authorizer 拒绝 INSERT/UPDATE/DELETE/DDL/ATTACH/PRAGMA 写；自测含写尝试前后行数与文件哈希校验 |
 | 不得访问其他文件 | authorizer 拒绝 `ATTACH`；无法通过 SQL 触达库外文件 |
 | 不得加载扩展 | `enable_load_extension(False)` + authorizer 拦截 `load_extension()` 函数 |
@@ -55,9 +55,17 @@ gunicorn --pythonpath webapp --bind 0.0.0.0:8000 --workers 1 --threads 16 app:ap
 
 - `demo/make_demo_db.py`：生成 `demo_sensors.db`（6 个传感器 × 6 小时 × 10 秒间隔，
   13260 行；重试批次 `B-20261110-RETRY` 造成 270 组重复采样，共 300 行多余）。
+  同库另有 **`sensor_raw` 长文本原始报文表**（与采样一一对应的 13260 条网关报文，
+  每条约 900 字节，重试报文带 `"flag":"RETRY"` 标记），用于复现工程师用 `LIKE`
+  筛查长文本报文的真实场景。
 - `demo/find_duplicates.sql`：重复采样排查 SQL 五连——汇总、明细、按批次定位、
   待清理行预览（`ROW_NUMBER()` 去重）、修复后验证。页面内置了其中三条作为一键示例。
-- 页面「慢查询」示例（递归 CTE）用于演示 3 秒自动终止与手动取消。
+- `demo/find_raw_packets.sql`：原始报文 `LIKE` 筛查五连——RETRY 标记筛查、
+  设备+批次联合筛查、`WITH` + `LIKE` 占比统计、未命中空结果，以及一条会超时的
+  慢 `LIKE`（动态模式对长文本全量匹配，演示库上约 3.4s）。
+- 页面「慢 LIKE（演示超时/取消）」示例在真实长文本报文上触发 3 秒自动终止/手动取消；
+  「慢查询」示例（递归 CTE）同样用于演示终止。两者返回 `timeout`/`cancelled` 时，
+  计算均已被 `interrupt()` 真正中断、名额已释放，可立即发起下一条查询。
 
 ## 目录结构
 
@@ -67,10 +75,11 @@ webapp/
   query_manager.py     # 查询执行器：名额、超时、取消、只读 authorizer、行数上限
   templates/index.html # 单页面前端（无外部依赖）
 demo/
-  make_demo_db.py      # 演示库生成脚本
+  make_demo_db.py      # 演示库生成脚本（含 sensor_samples 与长文本 sensor_raw）
   find_duplicates.sql  # 重复采样排查 SQL
+  find_raw_packets.sql # 原始报文 LIKE 筛查 SQL（含慢 LIKE 终止演示）
 tests/
-  selftest.py          # 关键功能自测（40 项检查）
+  selftest.py          # 关键功能自测（48 项检查，含 LIKE 长文本终止）
 Dockerfile  docker-compose.yml  requirements.txt
 ```
 
@@ -84,7 +93,8 @@ python3 tests/selftest.py http://127.0.0.1:8123 /tmp/demo_sensors.db /tmp/upload
 ```
 
 覆盖：上传校验、表结构、只读约束（含 `WITH` 伪装写、`ATTACH`、`load_extension`、
-多语句）、重复采样 SQL、1000 行截断、失败无半份结果、3 秒自动终止、并发满额 429、
+多语句）、重复采样 SQL、**长文本 `LIKE` 筛查与慢 `LIKE` 的超时/手动取消（缺陷报告原场景）**、
+1000 行截断、失败无半份结果、3 秒自动终止、并发满额 429、
 取消真实停止计算并释放名额、其他查询不受影响、库文件哈希不变。
 
 ## 已知限制

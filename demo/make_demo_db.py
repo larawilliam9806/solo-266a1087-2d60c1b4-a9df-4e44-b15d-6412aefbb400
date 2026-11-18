@@ -31,8 +31,16 @@ CREATE TABLE sensor_samples (
     batch_id    TEXT NOT NULL    -- 入库批次
 );
 
+CREATE TABLE sensor_raw (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    sensor_id   TEXT NOT NULL,
+    ts          TEXT NOT NULL,
+    raw_text    TEXT NOT NULL    -- 网关原始报文（长文本，工程师常用 LIKE 筛查）
+);
+
 CREATE INDEX idx_samples_sensor_ts ON sensor_samples(sensor_id, ts);
 CREATE INDEX idx_samples_batch     ON sensor_samples(batch_id);
+CREATE INDEX idx_raw_sensor_ts     ON sensor_raw(sensor_id, ts);
 """
 
 # sensor_id, 位置, 指标, 单位, 基线, 振幅
@@ -93,6 +101,21 @@ def build(path):
                 rows,
             )
             total += len(rows)
+            # 每条采样对应一条长文本原始报文（重试报文带 RETRY 标记，便于 LIKE 筛查）
+            raw_rows = []
+            for seq, (rsid, rts, rval, ringest, rbatch) in enumerate(rows):
+                flag = "RETRY" if rbatch == BATCH_RETRY else "OK"
+                payload = (
+                    f'{{"seq":{seq},"dev":"{rsid}","ts":"{rts}",'
+                    f'"readings":[{{"k":"sample","v":{rval}}}],'
+                    f'"ingested_at":"{ringest}","batch":"{rbatch}","flag":"{flag}",'
+                    f'"trace":"' + ("0123456789ABCDEF" * 48) + '"}}'
+                )
+                raw_rows.append((rsid, rts, payload))
+            conn.executemany(
+                "INSERT INTO sensor_raw (sensor_id, ts, raw_text) VALUES (?,?,?)",
+                raw_rows,
+            )
         conn.commit()
 
         dup_groups = conn.execute(
@@ -103,8 +126,10 @@ def build(path):
             "SELECT COALESCE(SUM(n-1),0) FROM (SELECT COUNT(*) AS n FROM sensor_samples "
             "GROUP BY sensor_id, ts HAVING n > 1)"
         ).fetchone()[0]
+        raw_total = conn.execute("SELECT COUNT(*) FROM sensor_raw").fetchone()[0]
         print(f"已生成 {path}")
         print(f"  传感器 {len(SENSORS)} 个，采样总行数 {total}")
+        print(f"  原始报文 {raw_total} 条（长文本，含 RETRY 标记，可 LIKE 筛查）")
         print(f"  重复采样组 {dup_groups} 个，多出重复行 {dup_rows} 行")
     finally:
         conn.close()

@@ -21,6 +21,16 @@ SLOW_SQL = (
     "WITH RECURSIVE cnt(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM cnt "
     "WHERE x < 300000000) SELECT COUNT(*), SUM(x) FROM cnt"
 )
+# 长文本原始报文上的慢 LIKE（动态模式全量匹配，演示库上约 3.4s）——缺陷报告的原始场景
+SLOW_LIKE = (
+    "SELECT COUNT(*) AS n FROM (SELECT id FROM sensor_raw LIMIT 300) b, "
+    "sensor_raw a WHERE a.raw_text LIKE '%NOPE-' || b.id || '-ZZZ%'"
+)
+# 普通合法 LIKE：命中重试报文
+FAST_LIKE = (
+    "SELECT id FROM sensor_raw WHERE raw_text LIKE '%\"flag\":\"RETRY\"%' "
+    "ORDER BY id LIMIT 10"
+)
 DUP_SQL = (
     "SELECT sensor_id, ts, COUNT(*) AS n FROM sensor_samples "
     "GROUP BY sensor_id, ts HAVING COUNT(*) > 1 ORDER BY n DESC, sensor_id, ts"
@@ -183,6 +193,44 @@ def main():
         check("找到 270 组重复", j["row_count"] == 270, f"got {j['row_count']}")
         check("最大重复次数为 3", j["rows"][0][2] == 3, str(j["rows"][0]))
         check("未截断", j["truncated"] is False)
+
+    print("== LIKE 长文本原始报文 ==")
+    st, j = c.run_query(FAST_LIKE)
+    j = c.wait_final(j["job_id"])
+    check("合法 LIKE 筛查可执行并返回行", j["status"] == "done" and j["row_count"] == 10, str(j)[:160])
+    st, j = c.run_query(
+        "WITH r AS (SELECT id FROM sensor_raw WHERE raw_text LIKE '%RETRY%') "
+        "SELECT COUNT(*) FROM r"
+    )
+    j = c.wait_final(j["job_id"])
+    check("WITH + LIKE 合法查询可执行", j["status"] == "done" and j["rows"][0][0] == 300, str(j)[:160])
+    st, j = c.run_query("SELECT id FROM sensor_raw WHERE raw_text LIKE '%NO-SUCH-MARKER%'")
+    j = c.wait_final(j["job_id"])
+    check("LIKE 未命中返回空结果", j["status"] == "done" and j["row_count"] == 0, str(j)[:160])
+
+    t0 = time.monotonic()
+    st, j = c.run_query(SLOW_LIKE)
+    check("慢 LIKE 被受理", st == 200, f"got {st} {j}")
+    j = c.wait_final(j["job_id"])
+    wall = time.monotonic() - t0
+    check("慢 LIKE 约 3s 自动终止（不等自然结束）",
+          j["status"] == "timeout" and 2.0 <= wall <= 6.0,
+          f"status={j['status']} wall={wall:.2f}s")
+    st, j2 = c.run_query("SELECT 1 AS ok")
+    check("慢 LIKE 超时后名额立即释放", st == 200, f"got {st} {j2}")
+    if st == 200:
+        c.wait_final(j2["job_id"])
+
+    st, r = c.run_query(SLOW_LIKE)
+    time.sleep(0.8)
+    t0 = time.monotonic()
+    st, j = c.call("POST", f"/query/{r['job_id']}/cancel")
+    cwall = time.monotonic() - t0
+    check("慢 LIKE 手动取消 10s 内返回 cancelled（缺陷核心）",
+          j.get("status") == "cancelled" and cwall < 3.0,
+          f"status={j.get('status')} wall={cwall:.2f}s")
+    st, _ = c.run_query("SELECT 1")
+    check("慢 LIKE 取消后可立即接收新查询", st == 200, f"got {st}")
 
     print("== 行数上限与截断 ==")
     st, j = c.run_query(

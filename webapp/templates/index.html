@@ -79,7 +79,9 @@
       <button data-ex="dup">重复采样汇总</button>
       <button data-ex="dupDetail">重复采样明细</button>
       <button data-ex="dupRows">待清理的重复行</button>
-      <button data-ex="slow">慢查询（演示超时/取消）</button>
+      <button data-ex="likeRaw">LIKE 筛查原始报文</button>
+      <button data-ex="slowLike">慢 LIKE（演示超时/取消）</button>
+      <button data-ex="slow">慢查询（递归 CTE）</button>
     </div>
     <textarea id="sql" spellcheck="false" placeholder="SELECT ... -- 仅允许 SELECT / WITH"></textarea>
     <div class="row" style="margin-top:8px">
@@ -118,6 +120,16 @@ WITH ranked AS (
   FROM sensor_samples
 )
 SELECT * FROM ranked WHERE rn > 1 ORDER BY sensor_id, ts;`,
+  likeRaw: `-- LIKE 筛查长文本原始报文：找出所有重试批次（RETRY 标记）的报文
+SELECT id, sensor_id, ts, substr(raw_text, 1, 120) AS raw_head
+FROM sensor_raw
+WHERE raw_text LIKE '%"flag":"RETRY"%'
+ORDER BY id
+LIMIT 20;`,
+  slowLike: `-- 慢 LIKE：对长文本原始报文做动态模式全量匹配（约 3.4s），用于演示 3 秒自动终止与手动取消
+SELECT COUNT(*) AS n
+FROM (SELECT id FROM sensor_raw LIMIT 300) b, sensor_raw a
+WHERE a.raw_text LIKE '%NOPE-' || b.id || '-ZZZ%';`,
   slow: `-- 慢查询：用于演示 3 秒自动终止与手动取消
 WITH RECURSIVE cnt(x) AS (
   SELECT 1
